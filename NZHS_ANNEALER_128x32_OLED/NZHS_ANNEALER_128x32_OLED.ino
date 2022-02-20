@@ -16,7 +16,7 @@
 #include <DallasTemperature.h>
 
 //-- macros---------------------------------------------------------------
-//#define DEBUG //defining DEBUG will remove the splash screen and enable serial debug info
+#define DEBUG //defining DEBUG will remove the splash screen and enable serial debug info
 #define SERVO
 //                          Major Version
 //                          | Minor Version
@@ -24,10 +24,10 @@
 //                          | | |
 //                          | | |
 //                          | | |
-#define SOFTWARE_VERSION F("3.6.0")
+#define SOFTWARE_VERSION F("3.6.1")
 #define SCREEN_WIDTH 128 // OLED display width, in pixels
-#define SCREEN_HEIGHT 32 // OLED display height, in pixels
-#define PSU_OVERCURRENT 12300 //12.3A
+#define SCREEN_HEIGHT 64 // OLED display height, in pixels
+#define PSU_OVERCURRENT 15300 //12.3A
 #define CURRENT_SENSOR_SCALE 49  //Choose the current scaling factor to suit your sensor, default is for 20A device. ACS712-20A = 49, ACS712-30A = 74
 #define TEMP_RESOLUTION 9 //ADC resolution on temp sensor
 #define TEMP_LIMIT 55 //capacitor temperature limit degC
@@ -43,15 +43,47 @@
 #define COOLDOWN_PERIOD 300000 //Cooling period in milliseconds
 #define DISPLAY_ADDRESS 0x3C
 #define SERVO_OPEN_POSITION 5  //timer load value for servo pulse. 128us per timer count. 7 => 0.89ms pulse
-#define SERVO_CLOSE_POSITION 15 // 15 => 1.92ms pulse
-#define STEPPER_SCALING_FACTOR 1 //1.28 //Used to compensate for BIGTREETECH controllers needing 256 steps per rev
-#define STEPPER_STEPS_PER_TURN 200*STEPPER_SCALING_FACTOR*STEPPER_MICROSTEPS // stepper motor steps per revolution (e.g. 200 step motor) * microsteps.
-#define STEPPER_MICROSTEPS 16 // number of microsteps. set to 1 if no microstepping
-#define CASE_FEEDER_STEPS_DROP_TO_PRELOAD 185*STEPPER_MICROSTEPS*STEPPER_SCALING_FACTOR
+#define SERVO_CLOSE_POSITION 10 // 15 => 1.92ms pulse
+#define STEPPER_SCALING_FACTOR 1.28 //1.28 //Used to compensate for BIGTREETECH controllers needing 256 steps per rev
+#define CASE_FEEDER_STATIONS 4 // Number of stations for the feeder
+#define STEPPER_MICROSTEPS 32 // number of microsteps. set to 1 if no microstepping
+#define STEPPER_STEPS_PER_TURN 200 * STEPPER_SCALING_FACTOR * STEPPER_MICROSTEPS / CASE_FEEDER_STATIONS  // stepper motor steps per revolution (e.g. 200 step motor) * microsteps.
+#define CASE_FEEDER_STEPS_DROP_TO_PRELOAD 165 * STEPPER_MICROSTEPS * STEPPER_SCALING_FACTOR / CASE_FEEDER_STATIONS
 #define CASE_FEEDER_STEPS_PRELOAD_TO_DROP (STEPPER_STEPS_PER_TURN - CASE_FEEDER_STEPS_DROP_TO_PRELOAD + 1)
-#define CASE_FEEDER_HOPPER_START 70*STEPPER_MICROSTEPS*STEPPER_SCALING_FACTOR
-#define CASE_FEEDER_HOPPER_END 130*STEPPER_MICROSTEPS*STEPPER_SCALING_FACTOR
+#define CASE_FEEDER_HOPPER_START 70 * STEPPER_MICROSTEPS * STEPPER_SCALING_FACTOR / CASE_FEEDER_STATIONS
+#define CASE_FEEDER_HOPPER_END 130 * STEPPER_MICROSTEPS * STEPPER_SCALING_FACTOR / CASE_FEEDER_STATIONS
+
+#define CASE_FEEDER_ALTERNATIVE_MODE
+#define ALLOW_PREFILL
+
 #define MODE_KEY_USED  //defines the use of the mode key input. comment out this #define to disable mode selection and reassign the mode key input to force case drop in the event of a stuck case
+#define DISABLE_WARNING // no "set time ok" warning
+
+#if SCREEN_HEIGHT == 64
+
+  #define HI_RES 1
+  #define LOGO_Y 16
+  #define ROW_ACT_L1   0
+  #define ROW_ACT_L2  16
+  #define ROW_MAIN_L1 32
+  #define ROW_MAIN_L2 48
+
+#else
+
+  #define LOGO_Y  0
+  #define ROW_ACT_L1   0
+  #define ROW_ACT_L2  16
+  #define ROW_MAIN_L1  0
+  #define ROW_MAIN_L2 16
+
+#endif
+
+#define ROW_S1 ROW_MAIN_L1
+#define ROW_S2 ROW_MAIN_L1 + 8
+#define ROW_S3 ROW_MAIN_L2
+#define ROW_S4 ROW_MAIN_L2 + 8
+
+
 
 // temp sensor pin asignment DS1820
 #define ONE_WIRE_BUS 8
@@ -86,6 +118,10 @@ typedef enum tStateMachineStates
   STATE_SHOW_SOFTWARE_VER,
   STATE_OVERCURRENT_WARNING,
   STATE_UNKNOWN,
+#ifdef ALLOW_PREFILL
+  STATE_PREFILL,
+  STATE_PREFILL_DROPPING,
+#endif
 } tStateMachineStates;
 
 typedef enum ModeList
@@ -93,6 +129,9 @@ typedef enum ModeList
   MODE_SINGLE_SHOT = 0,
   MODE_FREE_RUN,
   MODE_AUTOMATIC,
+#ifdef ALLOW_PREFILL
+  MODE_PREFILL,
+#endif
 } ModeList;
 
 //--global constant declarations-----------------------------------------
@@ -338,7 +377,7 @@ void setup()
   closeDropGate();
   #ifdef DEBUG
   Serial.begin(115200);
-  delay(20);
+  while (! Serial) { ; }
   Serial.println(F("Debug active."));
   #endif
 
@@ -353,27 +392,27 @@ void setup()
   display.setCursor(0, 0);
 
   #ifndef DEBUG //dont do the splash startup in debug
-    display.drawBitmap(0, 0,  anneallogo, 128, 32, 1);
+    display.drawBitmap(0, LOGO_Y,  anneallogo, 128, 32, 1);
     display.display();
     delay(2000);
     display.clearDisplay();
-    display.drawBitmap(0, 0,  anneallogo2, 128, 32, 1);
+    display.drawBitmap(0, LOGO_Y,  anneallogo2, 128, 32, 1);
     display.display();
     delay(2000);
 
     for(uint8_t i = 0; i <= 20; i++)
     {
       display.clearDisplay();
-      display.drawBitmap(0, 0,  projectile, 128, 32, 1);
+      display.drawBitmap(0, LOGO_Y,  projectile, 128, 32, 1);
       display.display();
       delay(100);
       display.clearDisplay();
-      display.drawBitmap(0, 0,  projectile2, 128, 32, 1);
+      display.drawBitmap(0, LOGO_Y,  projectile2, 128, 32, 1);
       display.display();
       delay(100);
     }
   #else
-    delay(2000);
+    //delay(2000);
   #endif
   display.clearDisplay();
   //Setup temp sensor and read 1-wire address. initiate first temp reading
@@ -462,7 +501,9 @@ ISR(TIMER2_COMPA_vect){//timer2 interrupt
       else //speed up again once new case is picked
       {
         // set compare match register - divide by microsteps to shorten step period
+        #ifndef CASE_FEEDER_ALTERNATIVE_MODE
           OCR2A = 170 / STEPPER_MICROSTEPS;
+        #endif
       }
 		StepsToGo = StepsToGo - 1;
 	  }
@@ -510,7 +551,11 @@ void loop()
   static uint32_t cooling_timer = 0;
   static uint32_t LoopStartTime;
   static float temperature = 0;
+#ifdef DISABLE_WARNING
+   static bool Just_Booted = 0;
+#else
   static bool Just_Booted = 1;
+#endif
   static bool Next_Cycle_Is_STOPPED = 0;
 
   //boot the watchdog
@@ -539,6 +584,12 @@ void loop()
       {
         updateSystemState(STATE_ANNEALING); //STATE_PRELOAD
       }
+#ifdef ALLOW_PREFILL
+      else if (CurrentMode == MODE_PREFILL)
+      {
+          updateSystemState(STATE_PREFILL);
+      }
+#endif
       else
       {
         updateSystemState(STATE_ANNEALING);
@@ -589,8 +640,18 @@ void loop()
             digitalWrite(g_FeederStepperEnPin,HIGH); //disable stepper driver in free run mode
             turnModeLedOn();
   	      }
-  	      else if(CurrentMode == MODE_FREE_RUN)
-  	      {
+#ifdef ALLOW_PREFILL
+          else if (CurrentMode == MODE_FREE_RUN)
+          {
+            CurrentMode = MODE_PREFILL;
+            digitalWrite(g_FeederStepperEnPin, LOW); //enable stepper driver in prefill mode
+            turnModeLedOff();
+          }
+          else if (CurrentMode == MODE_PREFILL)
+#else
+  	      else if (CurrentMode == MODE_FREE_RUN)
+#endif
+          {
             CurrentMode = MODE_AUTOMATIC;
             digitalWrite(g_FeederStepperEnPin,LOW); //enable stepper driver in auto mode
   	        turnModeLedOn();
@@ -623,7 +684,6 @@ void loop()
   {
     case STATE_STOPPED:
     {
-      updateSystemState(g_SystemState);
       if(upKey == 0)
       {
         upKeyDuration = 0;
@@ -650,62 +710,11 @@ void loop()
       }
 
       display.clearDisplay();
-      display.setCursor(0, 0);
-      display.print(F("TIME"));
-
-      if(FanIsOn)
-      {
-         display.setCursor(70,0);
-         display.setTextSize(1);
-         display.println(F("FAN ON"));
-         display.setTextSize(2);
-      }
-      else
-      {
-        display.println(F(" "));
-      }
-      display.setCursor(0,16);
-      display.print(AnnealTime_ms/1000, DEC);
-      display.print(F("."));
-      display.print((AnnealTime_ms%1000)/100, DEC);
-      display.print(F("s"));
-      display.setCursor(70,24);
-      if(NumberDallasTempDevices != 0)
-      {
-        display.setTextSize(1);
-        display.print(temperature, 1);
-        display.print((char PROGMEM)248);
-        display.print(F("C"));
-        display.setTextSize(2);
-      }
-
-      if(CurrentMode == MODE_FREE_RUN)
-      {
-         display.setCursor(70,8);
-         display.setTextSize(1);
-         display.println(F("FREE RUN"));
-         display.setTextSize(2);
-      }
-      else if(CurrentMode == MODE_AUTOMATIC)
-      {
-         display.setCursor(70,8);
-         display.setTextSize(1);
-         display.println(F("AUTO FEED"));
-         display.setTextSize(2);
-      }
-      else if(CurrentMode == MODE_SINGLE_SHOT)
-      {
-         display.setCursor(70,8);
-         display.setTextSize(1);
-         display.println(F("ONE SHOT"));
-         display.setTextSize(2);
-      }
-      display.drawLine(64,0,64,32,WHITE);
+      printMainInfo(FanIsOn, temperature, AnnealTime_ms);
       display.display();
       turnStartStopLedOff();
       turnAnnealerOff();
       psuCurrent_ma = readPsuCurrent_ma(); //--------- added this
-      updateSystemState(STATE_STOPPED);
     }
     break;
 
@@ -721,8 +730,8 @@ void loop()
           {
             preloadCase();
           }
+        updateSystemState(g_SystemState);
       }
-      updateSystemState(g_SystemState);
 
       if (millis() > SystemTimeTarget)
       {
@@ -746,8 +755,12 @@ void loop()
       if((SystemTimeTarget - millis()) < 100000)
       {
         display.clearDisplay();
-        display.setCursor(0, 0);
+        #ifdef HI_RES
+        printMainInfo(FanIsOn, temperature, AnnealTime_ms);
+        #endif
+        display.setCursor(0, ROW_ACT_L1);
         display.println(F("ANNEALING"));
+
         if(CurrentSensorPresent)
         {
           display.print(psuCurrent_ma/1000,DEC);
@@ -755,14 +768,9 @@ void loop()
           display.print((psuCurrent_ma%1000)/100, DEC);
           display.print(F("A  "));
         }
-        display.print((SystemTimeTarget - millis())/1000, DEC);
-        display.print(F("."));
-        display.print(((SystemTimeTarget - millis())%1000)/100, DEC);
-        display.print(F("s"));
+        displaySystemTimeTarget(SystemTimeTarget - millis());
         display.display();
       }
-
-
     }
     break;
 
@@ -775,13 +783,18 @@ void loop()
           break;
         }
         SystemTimeTarget = millis() + DROP_TIME;
+        updateSystemState(g_SystemState);
       }
-      updateSystemState(g_SystemState);
 
       if (millis() < SystemTimeTarget) // wait time is not up, break.
       {
         display.clearDisplay();
-        display.setCursor(15, 8);
+        #ifdef HI_RES
+        printMainInfo(FanIsOn, temperature, AnnealTime_ms);
+        display.setCursor(0, ROW_ACT_L1);
+        #else
+        display.setCursor(15, ROW_S1);
+        #endif
         display.println(F("DROPPING"));
         display.display();
         break;
@@ -809,6 +822,12 @@ void loop()
       {
         updateSystemState(STATE_STOPPED);
       }
+#ifdef ALLOW_PREFILL
+      else if(CurrentMode == MODE_PREFILL)
+      {
+        updateSystemState(STATE_STOPPED);
+      }
+#endif
       else
       {
         updateSystemState(STATE_RELOADING);
@@ -821,8 +840,8 @@ void loop()
       if (hasSystemStateChanged())
       {
         preloadCase(); //pick up first case after start button is pressed
+        updateSystemState(g_SystemState);
       }
-      updateSystemState(g_SystemState);
       if(caseFeederStillMoving()) //case feeder is still moving so wait until it's finished moving before starting the drop sequence
         {
           break;
@@ -841,19 +860,19 @@ void loop()
         		loadCase();
             SystemTimeTarget = millis() + RELOAD_TIME_AUTO__FEED; //load time when in auto feed mode
         	}
+        updateSystemState(g_SystemState);
       }
-      updateSystemState(g_SystemState);
-
 
       if (millis() < SystemTimeTarget)
       {
         display.clearDisplay();
-        display.setCursor(0, 0);
+        display.setCursor(0, ROW_ACT_L1);
         display.println(F("LOADING"));
-        display.print((SystemTimeTarget - millis())/1000, DEC);
-        display.print(".");
-        display.print(((SystemTimeTarget - millis())%1000)/100, DEC);
-        display.print("s");
+        display.print(F("      "));
+        displaySystemTimeTarget(SystemTimeTarget - millis());
+        #ifdef HI_RES
+        printMainInfo(FanIsOn, temperature, AnnealTime_ms);
+        #endif
         display.display();
         break;
       }
@@ -866,12 +885,8 @@ void loop()
       updateSystemState(g_SystemState);
 
       display.clearDisplay();
-      display.setCursor(0, 0);
-      display.print(F("TIME"));
-      display.setTextSize(1);
-      display.print(F(" & "));
-      display.setTextSize(2);
-      display.println(F("CASE"));
+      display.setCursor(0, ROW_ACT_L1);
+      display.println(F("TIME&CASE"));
       display.println(F("HEIGHT OK?"));
       display.display();
 
@@ -896,7 +911,7 @@ void loop()
       updateSystemState(g_SystemState);
       display.setTextSize(1);
       display.clearDisplay();
-      display.setCursor(0, 0);
+      display.setCursor(0, ROW_MAIN_L1);
       display.print(F("SW VER : "));
       display.println(SOFTWARE_VERSION);
       display.print(F("Temp sensor : "));
@@ -914,8 +929,8 @@ void loop()
       {
         SystemTimeTarget = millis() + TEMP_CONVERSION_TIME; //time for temp conversion
         turnStartStopLedOff();
+        updateSystemState(g_SystemState);
       }
-      updateSystemState(g_SystemState);
 
       cooling_timer = COOLDOWN_PERIOD + millis(); //keep resetting fan timer while in cooldown mode
       display.clearDisplay();
@@ -924,6 +939,9 @@ void loop()
       display.print(temperature, 1);
       display.print((char PROGMEM)248);
       display.print(F("C"));
+        #ifdef HI_RES
+        printMainInfo(FanIsOn, temperature, AnnealTime_ms);
+        #endif
       display.display();
       if(temperature < (TEMP_LIMIT - TEMP_HYSTERESIS)) //has it cooled enough to resume?
       {
@@ -932,6 +950,7 @@ void loop()
 
     }
     break;
+
     case STATE_JUST_BOOTED:
     {
       //temperature = sensors.getTempCByIndex(0);
@@ -946,10 +965,76 @@ void loop()
       }
     }
     break;
+
+#ifdef ALLOW_PREFILL
+    case STATE_PREFILL:
+    {
+      if (hasSystemStateChanged())
+      {
+        updateSystemState(g_SystemState);
+        openDropGate();
+        preloadCase();
+        loadCase();
+        SystemTimeTarget = millis() + RELOAD_TIME_AUTO__FEED;
+        updateSystemState(STATE_PREFILL_DROPPING);
+        break;
+      }
+
+      if (millis() > SystemTimeTarget)
+      {
+        updateSystemState(STATE_STOPPED);
+      }
+
+      if((SystemTimeTarget - millis()) < 100000)
+      {
+        display.clearDisplay();
+        #ifdef HI_RES
+        printMainInfo(FanIsOn, temperature, AnnealTime_ms);
+        #endif
+        display.setCursor(0, ROW_ACT_L1);
+        display.println(F("PREFILL"));
+
+        displaySystemTimeTarget(SystemTimeTarget - millis());
+        display.display();
+      }
+    }
+    break;
+
+    case STATE_PREFILL_DROPPING:
+    {
+      if (hasSystemStateChanged())
+      {
+        SystemTimeTarget = millis() + DROP_TIME;
+        updateSystemState(g_SystemState);
+      }
+
+      if (millis() < SystemTimeTarget) // wait time is not up, break.
+      {
+        display.clearDisplay();
+        #ifdef HI_RES
+        printMainInfo(FanIsOn, temperature, AnnealTime_ms);
+        display.setCursor(0, ROW_ACT_L1);
+        #else
+        display.setCursor(15, ROW_S1);
+        #endif
+        display.println(F("DROPPING"));
+        display.display();
+        break;
+      }
+      closeDropGate();
+
+      updateSystemState(STATE_STOPPED);
+    }
+    break;
+
+
+#endif
+
     default:
     {
-      updateSystemState(g_SystemState);
-      updateSystemState(STATE_STOPPED);
+      if (hasSystemStateChanged()) {
+        //updateSystemState(STATE_STOPPED);
+      }
     }
   }
   startPrev = start;
@@ -967,7 +1052,7 @@ void loop()
     FanIsOn=false;
   }
 
-  #ifdef DEBUG
+  #ifdef DEBUG_CONTINUOUS
 
   Serial.print(F("Annealer current;"));
   Serial.print(psuCurrent_ma/1000,DEC);
@@ -1006,6 +1091,85 @@ void loop()
 
 }
 
+static void displaySystemTimeTarget (int32_t SystemTimeTargetDiff) {
+  if (SystemTimeTargetDiff >= 0) {
+    display.print((SystemTimeTargetDiff)/1000, DEC);
+    display.print(".");
+    display.print(((SystemTimeTargetDiff)%1000)/100, DEC);
+    display.print("s");
+  }
+}
+
+/*---------------------------------------------------------------------------*/
+/*! @brief      print main information
+  @return       nothing
+*//*-------------------------------------------------------------------------*/
+static void printMainInfo(bool FanIsOn, float temperature, uint16_t AnnealTime_ms)
+{
+      display.setCursor(0, ROW_MAIN_L1);
+      display.print(F("TIME"));
+
+      if(FanIsOn)
+      {
+         display.setCursor(70, ROW_S1);
+         display.setTextSize(1);
+         display.println(F("FAN ON"));
+         display.setTextSize(2);
+      }
+      else
+      {
+        display.println(F(" "));
+      }
+      display.setCursor(0, ROW_MAIN_L2);
+      display.print(AnnealTime_ms/1000, DEC);
+      display.print(F("."));
+      display.print((AnnealTime_ms%1000)/100, DEC);
+      display.print(F("s"));
+      display.setCursor(70, ROW_S3);
+      if(NumberDallasTempDevices != 0)
+      {
+        display.setTextSize(1);
+        display.print(temperature, 1);
+        display.print((char PROGMEM)248);
+        display.print(F("C"));
+        display.setTextSize(2);
+      }
+
+      if(CurrentMode == MODE_FREE_RUN)
+      {
+         display.setCursor(70, ROW_S2);
+         display.setTextSize(1);
+         display.println(F("FREE RUN"));
+         display.setTextSize(2);
+      }
+      else if(CurrentMode == MODE_AUTOMATIC)
+      {
+         display.setCursor(70, ROW_S2);
+         display.setTextSize(1);
+         display.println(F("AUTO FEED"));
+         display.setTextSize(2);
+      }
+      else if(CurrentMode == MODE_SINGLE_SHOT)
+      {
+         display.setCursor(70, ROW_S2);
+         display.setTextSize(1);
+         display.println(F("ONE SHOT"));
+         display.setTextSize(2);
+      }
+#ifdef ALLOW_PREFILL
+      else if(CurrentMode == MODE_PREFILL)
+      {
+         display.setCursor(70, ROW_S2);
+         display.setTextSize(1);
+         display.println(F("PREFILL"));
+         display.setTextSize(2);
+      }
+#endif
+      display.drawLine(64, ROW_MAIN_L1, 64, ROW_MAIN_L2 + 16, WHITE);
+
+  return;
+}
+
 /*---------------------------------------------------------------------------*/
 /*! @brief      Set system state.
   @param        state: System state.
@@ -1014,6 +1178,11 @@ static tStateMachineStates updateSystemState(tStateMachineStates const state)
 {
   g_SystemStatePrev = g_SystemState;
   g_SystemState = state;
+  #ifdef DEBUG
+    Serial.print(F("State;"));
+    Serial.print(g_SystemState);
+    Serial.println(F(";"));
+  #endif
 }
 
 /*---------------------------------------------------------------------------*/
@@ -1149,7 +1318,7 @@ static uint16_t readPsuCurrent_ma(void)
   uint16_t adc = 0;
 
   adc = analogRead(g_PsuCurrentAdcPin);
-  adc = abs(adc - psuCurrentZeroOffset)*CURRENT_SENSOR_SCALE; //2.5V ADC offset , Scaling factor to suit sensor chosen.
+adc = abs(adc - psuCurrentZeroOffset)*CURRENT_SENSOR_SCALE; //2.5V ADC offset , Scaling factor to suit sensor chosen.
   if(adc > 25000) // error from abs function can return large numbers if ADC measurement goes
 
   {
@@ -1164,7 +1333,11 @@ static uint16_t readPsuCurrent_ma(void)
 *//*-------------------------------------------------------------------------*/
 static void preloadCase(void)
 {
+  #ifdef CASE_FEEDER_ALTERNATIVE_MODE
+  StepsToGo = StepsToGo + CASE_FEEDER_STEPS_PRELOAD_TO_DROP;
+  #else
 	StepsToGo = StepsToGo + CASE_FEEDER_STEPS_DROP_TO_PRELOAD;
+  #endif
 	//enableStepperPulses(1);
 }
 
@@ -1173,7 +1346,11 @@ static void preloadCase(void)
 *//*-------------------------------------------------------------------------*/
 static void loadCase(void)
 {
-	StepsToGo = StepsToGo + CASE_FEEDER_STEPS_PRELOAD_TO_DROP; //multiply by 2 for the 2 half cycles counted by the timer interrupt
+  #ifdef CASE_FEEDER_ALTERNATIVE_MODE
+	StepsToGo = StepsToGo + CASE_FEEDER_STEPS_DROP_TO_PRELOAD;
+  #else
+  StepsToGo = StepsToGo + CASE_FEEDER_STEPS_PRELOAD_TO_DROP; //multiply by 2 for the 2 half cycles counted by the timer interrupt
+  #endif
 	//enableStepperPulses(1);
 }
 
